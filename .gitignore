@@ -3,6 +3,7 @@
 .env/
 .env.*
 !.env.example
+LOGIN.md
 
 # Reference papers / large third-party binaries
 *.pdf
