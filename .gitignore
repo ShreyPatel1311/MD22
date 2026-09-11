@@ -1,0 +1,41 @@
+# Reference papers / large third-party binaries
+*.pdf
+
+# Data (lives in a Hugging Face dataset repo)
+data/raw/*
+!data/raw/.gitkeep
+
+# Model weights / checkpoints (live in Hugging Face model repos)
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+outputs/
+wandb/
+lightning_logs/
+multirun/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
