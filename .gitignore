@@ -1,3 +1,9 @@
+# Secrets / local credentials
+.env
+.env/
+.env.*
+!.env.example
+
 # Reference papers / large third-party binaries
 *.pdf
 
