@@ -119,9 +119,15 @@ def main():
 
     if args.max_pathways:
         return
+    exec(compile(cells[merge_idx], f"<neb cell {merge_idx}>", "exec"), ns)
+    # Later notebook cells are validation/report cells written for the published registry (they index
+    # e.g. POTENTIAL_REGISTRY["mace"]); run them best-effort so they cannot block scoring.
     for i in sorted(cells):
-        if i >= merge_idx:
-            exec(compile(cells[i], f"<neb cell {i}>", "exec"), ns)
+        if i > merge_idx:
+            try:
+                exec(compile(cells[i], f"<neb cell {i}>", "exec"), ns)
+            except Exception as e:
+                print(f"notebook cell {i} skipped: {type(e).__name__}: {e}", flush=True)
     merged = Path(ns["MERGED_OUT_DIR"]) / "ion_migration_neb_fp_results.json"
     shutil.copy(merged, out / "ion_migration_neb_fp_results.json")
 
