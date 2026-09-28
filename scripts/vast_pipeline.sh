@@ -7,6 +7,10 @@
 # Evaluation stages are independent: a failed stage is logged as FAILED and the next one still runs.
 set -euo pipefail
 
+# Optional run overrides committed to the repo (instance environment variables cannot be changed
+# after an instance is created). Values here take precedence over the instance environment.
+OVR="$(dirname "$0")/pipeline_overrides.env"
+if [ -f "$OVR" ]; then echo "sourcing $OVR"; cat "$OVR"; . "$OVR"; fi
 TRAIN_HOURS="${TRAIN_HOURS:-5}"
 EVAL_STAGES="${EVAL_STAGES:-force-matpes phase neb omat24}"   # evaluation stages to run
 OMAT_FRACTION="${OMAT_FRACTION:-0.1}"                            # random fraction of OMat24 rattled-1000
