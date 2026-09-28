@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 REGISTRY_CELL = '''
@@ -83,6 +83,9 @@ def main():
         jobs = jobs[: args.max_pathways]
     print(f"running {len(jobs)} job scripts with {args.workers} workers", flush=True)
     env = dict(os.environ, PYTHONPATH=str(Path(args.src).resolve()) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    # One CPU thread per job: with the library defaults, `workers` parallel jobs each start a
+    # thread per core, and the oversubscribed CPU made each force call take seconds (GPU idle).
+    env.update({v: "1" for v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")})
     t0 = time.time()
 
     def run(job):
@@ -91,7 +94,9 @@ def main():
         return job, rc
 
     with ThreadPoolExecutor(args.workers) as ex:
-        for k, (job, rc) in enumerate(ex.map(run, jobs)):
+        futures = [ex.submit(run, job) for job in jobs]
+        for k, fut in enumerate(as_completed(futures)):
+            job, rc = fut.result()
             print(f"  [{k + 1}/{len(jobs)}] rc={rc} {job.parent.parent.parent.parent.name}/{job.parent.name} ({time.time() - t0:.0f}s)", flush=True)
 
     if args.max_pathways:
