@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from md22nop.data.graph import collate, make_graph
+from md22nop.data.graph import collate, from_numpy, make_graph, to_numpy
 from md22nop.data.matpes import iter_structures, select
 from md22nop.training.train import load_model
 
@@ -36,7 +36,7 @@ THETA_THRESHOLDS = [1, 5, 10, 20, 30, 60, 90, 120, 178, 180]
 
 def _g(args):
     i, z, pos, cell, e, f = args
-    return i, make_graph(z, pos, cell, r_max=5.0)
+    return i, to_numpy(make_graph(z, pos, cell, r_max=5.0))
 
 
 def predict_forces(model, arrays, device, max_atoms=6000, workers=8):
@@ -64,7 +64,7 @@ def predict_forces(model, arrays, device, max_atoms=6000, workers=8):
             if batch and n_at + na > max_atoms:
                 flush()
                 batch, idx, n_at = [], [], 0
-            batch.append(g)
+            batch.append(from_numpy(g))
             idx.append(i)
             n_at += na
             if k % 20000 == 0:

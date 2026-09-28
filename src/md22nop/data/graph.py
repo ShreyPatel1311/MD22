@@ -51,3 +51,16 @@ def graph_from_atoms(atoms: ase.Atoms, r_max: float = 5.0, dtype: torch.dtype = 
 
 def collate(graphs: List[AtomicDataDict.Type]) -> AtomicDataDict.Type:
     return AtomicDataDict.batched_from_list(graphs)
+
+
+def to_numpy(data: AtomicDataDict.Type) -> dict:
+    """Plain-numpy copy of a graph, for returning from worker processes.
+
+    Tensors returned from multiprocessing workers go through torch's shared-memory file
+    descriptors, which fail in containers with a small /dev/shm; numpy arrays are pickled.
+    """
+    return {k: v.numpy() for k, v in data.items()}
+
+
+def from_numpy(data: dict) -> AtomicDataDict.Type:
+    return {k: torch.from_numpy(v) for k, v in data.items()}

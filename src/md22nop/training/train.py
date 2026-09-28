@@ -20,7 +20,7 @@ from typing import Dict, List
 import numpy as np
 import torch
 
-from md22nop.data.graph import TYPE_NAMES, collate, make_graph
+from md22nop.data.graph import TYPE_NAMES, collate, from_numpy, make_graph, to_numpy
 from md22nop.data.matpes import iter_structures
 from md22nop.models.e2ip import build_e2ip_nequip, e2ip_nll, e2ip_regularizer
 from nequip.data import AtomicDataDict
@@ -30,13 +30,13 @@ R_MAX = 5.0
 
 def _graph_worker(args):
     i, z, pos, cell, e, f = args
-    return make_graph(z, pos, cell, r_max=R_MAX, energy=e, forces=f)
+    return to_numpy(make_graph(z, pos, cell, r_max=R_MAX, energy=e, forces=f))
 
 
 def build_graphs(arrays: Dict[str, np.ndarray], workers: int) -> List[AtomicDataDict.Type]:
     items = list(iter_structures(arrays))
     with mp.Pool(workers) as pool:
-        return pool.map(_graph_worker, items, chunksize=64)
+        return [from_numpy(g) for g in pool.imap(_graph_worker, items, chunksize=64)]
 
 
 def dataset_stats(graphs, n_types: int = len(TYPE_NAMES)):
