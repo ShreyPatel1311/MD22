@@ -1,0 +1,107 @@
+import numpy as np
+import pytest
+import torch
+from ase.build import bulk
+from e3nn import o3
+
+from md22nop.data.graph import TYPE_NAMES, collate, graph_from_atoms
+from md22nop.models.e2ip import build_e2ip_nequip, e2ip_nll, e2ip_regularizer
+
+
+@pytest.fixture(scope="module", autouse=True)
+def float64():
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    yield
+    torch.set_default_dtype(prev)
+
+
+@pytest.fixture(scope="module")
+def model(float64):
+    torch.manual_seed(0)
+    m = build_e2ip_nequip(
+        TYPE_NAMES, num_layers=3, num_features=[16, 8, 8], radial_mlp_width=16,
+        avg_num_neighbors=40.0, per_type_energy_scales=1.0, per_type_energy_shifts=0.0,
+        head_hidden=8,
+    ).double()
+    return m.eval()
+
+
+def _atoms(seed=1):
+    at = bulk("NaCl", "rocksalt", a=5.6).repeat((2, 1, 1))
+    at.rattle(0.15, seed=seed)
+    return at
+
+
+def _run(model, atoms):
+    g = graph_from_atoms(atoms, dtype=torch.float64)
+    return model(collate([g]))
+
+
+def test_forces_are_negative_energy_gradient(model):
+    at = _atoms()
+    f = _run(model, at)["forces"].detach().numpy()
+    h, i, k = 1e-4, 3, 1
+    ep, em = at.copy(), at.copy()
+    ep.positions[i, k] += h
+    em.positions[i, k] -= h
+    fd = -(_run(model, ep)["energy"].item() - _run(model, em)["energy"].item()) / (2 * h)
+    assert abs(fd - f[i, k]) < 1e-6 * max(1.0, abs(fd))
+
+
+def test_covariance_is_spd_and_equivariant(model):
+    at = _atoms()
+    R = o3.rand_matrix(dtype=torch.float64).numpy()
+    at2 = at.copy()
+    at2.set_cell(at.cell.array @ R.T, scale_atoms=False)
+    at2.positions = at.positions @ R.T
+    o1, o2 = _run(model, at), _run(model, at2)
+    Rt = torch.as_tensor(R)
+    s1 = model.sigma0(o1["S"]).detach()
+    s2 = model.sigma0(o2["S"]).detach()
+    assert torch.linalg.eigvalsh(s1).min() > 0
+    assert torch.allclose(s2, Rt @ s1 @ Rt.T, atol=1e-10, rtol=1e-8)
+    assert torch.allclose(o2["forces"], o1["forces"] @ Rt.T, atol=1e-10)
+    assert torch.allclose(o2["nu"], o1["nu"]) and torch.allclose(o2["kappa"], o1["kappa"])
+    assert torch.allclose(o2["energy"], o1["energy"])
+
+
+def test_loss_backward(model):
+    model.train()
+    g = collate([graph_from_atoms(_atoms(s), dtype=torch.float64) for s in (1, 2)])
+    out = model(g)
+    y = torch.randn_like(out["forces"])
+    loss = (e2ip_nll(y, out["forces"], out["nu"], out["kappa"], out["S"], model.head.force_scale)
+            + 0.1 * e2ip_regularizer(y, out["forces"], out["nu"], out["kappa"])).mean()
+    loss.backward()
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    assert torch.isfinite(loss) and grads and all(torch.isfinite(gr).all() for gr in grads)
+    model.eval()
+
+
+def test_nll_matches_scipy_student_t():
+    stats = pytest.importorskip("scipy.stats")
+    rng = np.random.default_rng(0)
+    A = rng.normal(size=(3, 3))
+    S = torch.tensor((A + A.T) / 4)[None]
+    nu, kappa, fs = torch.tensor([7.3]), torch.tensor([0.8]), 0.2
+    y, gamma = torch.tensor(rng.normal(size=(1, 3))), torch.zeros(1, 3, dtype=torch.float64)
+    nll = e2ip_nll(y, gamma, nu, kappa, S, fs).item()
+    sigma0 = (fs**2 * torch.linalg.matrix_exp(S[0])).numpy()
+    m = nu.item() - 3 + 1
+    scale = nu.item() * (kappa.item() + 1) / (kappa.item() * m) * sigma0  # Eq. (7)
+    ref = -stats.multivariate_t(loc=np.zeros(3), shape=scale, df=m).logpdf(y.numpy()[0])
+    assert abs(nll - ref) < 1e-8
+
+
+def test_forward_does_not_overwrite_input_labels(model):
+    from nequip.data import AtomicDataDict
+    from md22nop.data.graph import make_graph
+    at = _atoms()
+    e_ref, f_ref = -123.0, np.full((len(at), 3), 0.5)
+    g = collate([make_graph(at.numbers, at.positions, at.cell.array, energy=e_ref, forces=f_ref,
+                            dtype=torch.float64)])
+    out = model(g)
+    assert g[AtomicDataDict.TOTAL_ENERGY_KEY].item() == e_ref
+    assert torch.equal(g[AtomicDataDict.FORCE_KEY], torch.as_tensor(f_ref))
+    assert not torch.allclose(out["forces"], g[AtomicDataDict.FORCE_KEY])
