@@ -1,10 +1,12 @@
 """Time-budgeted e2IP training on MatPES-PBE subsets.
 
 Loss (per batch):
-    L = lambda_E * mean_structures(((E_pred - E) / N_atoms / sigma_E)^2)
+    L = lambda_E * mean_structures(((E_pred - E) / N_atoms)^2)      [eV^2 / atom^2]
       + lambda_F * mean_atoms(NLL_i + lambda_reg * reg_i)
 NLL_i and reg_i are Eqs. (13)-(14) of the e2IP paper; lambda_reg = 0.1 follows its Table 5.
-The energy term's form and sigma_E are choices made here: the paper does not state its energy loss.
+The paper does not state its energy loss, so the energy term follows mace-torch's defaults
+(per-atom energy MSE, energy weight 1.0, raised to 1000.0 for the last quarter of training,
+``--energy_weight`` / ``--stage_two_energy_weight`` / ``start_swa = 3/4 of epochs``).
 """
 
 from __future__ import annotations
@@ -82,15 +84,15 @@ def to_device(data, device):
     return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in data.items()}
 
 
-def compute_loss(model, out, batch, cfg):
+def compute_loss(model, out, batch, cfg, lambda_e):
     n = batch[AtomicDataDict.NUM_NODES_KEY].to(out["energy"].dtype)
     e_ref = batch[AtomicDataDict.TOTAL_ENERGY_KEY].reshape(-1)
-    loss_e = (((out["energy"] - e_ref) / n / cfg["sigma_e"]) ** 2).mean()
+    loss_e = (((out["energy"] - e_ref) / n) ** 2).mean()
     y = batch[AtomicDataDict.FORCE_KEY]
     nll = e2ip_nll(y, out["forces"], out["nu"], out["kappa"], out["S"], model.head.force_scale)
     reg = e2ip_regularizer(y, out["forces"], out["nu"], out["kappa"])
     loss_f = (nll + cfg["lambda_reg"] * reg).mean()
-    loss = cfg["lambda_e"] * loss_e + cfg["lambda_f"] * loss_f
+    loss = lambda_e * loss_e + cfg["lambda_f"] * loss_f
     return loss, {"loss_e": loss_e.item(), "loss_f": loss_f.item(), "nll": nll.mean().item()}
 
 
@@ -176,7 +178,7 @@ def main():
     for q in ema.parameters():
         q.requires_grad_(False)
     n_params = sum(q.numel() for q in model.parameters())
-    cfg = {"lambda_e": 1.0, "sigma_e": 0.03, "lambda_f": 1.0, "lambda_reg": 0.1, "lr": args.lr,
+    cfg = {"lambda_e": 1.0, "lambda_e_stage_two": 1000.0, "stage_two_start_frac": 0.75, "lambda_f": 1.0, "lambda_reg": 0.1, "lr": args.lr,
            "weight_decay": 1e-3, "ema_decay": 0.999, "grad_clip": 10.0, "max_atoms": args.max_atoms,
            "hours": args.hours, "n_params": n_params, "r_max": R_MAX}
     print(f"model params: {n_params}", flush=True)
@@ -201,7 +203,8 @@ def main():
             model.train()
             batch = to_device(collate([train_g[i] for i in idx]), device)
             out_ = model(batch)
-            loss, parts = compute_loss(model, out_, batch, cfg)
+            lambda_e = cfg["lambda_e_stage_two"] if frac >= cfg["stage_two_start_frac"] else cfg["lambda_e"]
+            loss, parts = compute_loss(model, out_, batch, cfg, lambda_e)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
