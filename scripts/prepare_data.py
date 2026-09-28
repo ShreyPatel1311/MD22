@@ -43,7 +43,7 @@ def prepare_matpes(out: Path, fraction: float, seed: int):
           f"train={len(train_idx)} val={len(val_idx)}")
 
 
-def prepare_omat24(out: Path):
+def prepare_omat24(out: Path, fraction: float = 1.0, seed: int = 0):
     from ase_db_backends.aselmdb import LMDBDatabase
 
     tgz = download(OMAT24_RATTLED_1000_VAL_URL, out / "rattled-1000.tar.gz")
@@ -63,19 +63,25 @@ def prepare_omat24(out: Path):
         cells.append(atoms.cell.array)
         energies.append(float(row.energy))
         n_atoms.append(len(atoms))
-    np.savez(out / "omat24_rattled_1000.npz", numbers=np.concatenate(numbers),
-             positions=np.concatenate(positions), forces=np.concatenate(forces), cells=np.stack(cells),
-             energies=np.asarray(energies), n_atoms=np.asarray(n_atoms, dtype=np.int64),
-             structure_ids=np.arange(len(n_atoms), dtype=np.int64),
-             matpes_ids=np.asarray([str(i) for i in range(len(n_atoms))]))
+    arrays = dict(numbers=np.concatenate(numbers), positions=np.concatenate(positions),
+                  forces=np.concatenate(forces), cells=np.stack(cells), energies=np.asarray(energies),
+                  n_atoms=np.asarray(n_atoms, dtype=np.int64),
+                  structure_ids=np.arange(len(n_atoms), dtype=np.int64),
+                  matpes_ids=np.asarray([str(i) for i in range(len(n_atoms))]))
+    np.savez(out / "omat24_rattled_1000.npz", **arrays)
     print(f"OMat24 rattled-1000 val: {len(n_atoms)} structures")
+    if fraction < 1.0:
+        rng = np.random.default_rng(seed)
+        idx = np.sort(rng.choice(len(n_atoms), int(round(fraction * len(n_atoms))), replace=False))
+        np.savez(out / f"omat24_rattled_1000_{int(round(fraction * 100))}pct.npz", **select(arrays, idx))
+        print(f"OMat24 rattled-1000 subset: {len(idx)} structures (fraction {fraction}, seed {seed})")
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("dataset", choices=["matpes", "omat24"])
     p.add_argument("--out", default="data/raw")
-    p.add_argument("--fraction", type=float, default=0.10)
+    p.add_argument("--fraction", type=float, default=0.10, help="subset fraction (MatPES training subset / OMat24 evaluation subset)")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
     out = Path(args.out)
@@ -83,7 +89,7 @@ def main():
     if args.dataset == "matpes":
         prepare_matpes(out, args.fraction, args.seed)
     else:
-        prepare_omat24(out)
+        prepare_omat24(out, args.fraction, args.seed)
 
 
 if __name__ == "__main__":

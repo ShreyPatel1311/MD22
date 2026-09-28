@@ -156,7 +156,8 @@ def main():
                            "models": {k: {kk: np.asarray(vv).tolist() for kk, vv in v.items()} for k, v in fr.items()}}, f)
         summary[pop] = {"n_structures": int(len(idx)), "tables": metrics_tables(fr, Path(args.fpbench))}
     (out / f"{args.name}_force_metrics.json").write_text(json.dumps(summary, indent=1, default=float))
-    print("FORCE_METRICS " + json.dumps(summary, default=float))
+    print("FORCE_METRICS")
+    print(json.dumps(summary, indent=1, default=float))
 
 
 if __name__ == "__main__":
