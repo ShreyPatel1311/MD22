@@ -64,10 +64,12 @@ fi
 set +e
 
 stage eval-force-matpes
-python MD22/scripts/eval_force.py --checkpoint "$CKPT" --dataset data/matpes_pbe_full.npz --name matpes_pbe \
-  --exclude-ids data/matpes_pbe_10pct_split.json --fpbench FPBench --out results/force --workers "$WORKERS" 2>&1 | tee logs/eval_force_matpes.log
+# Held-out MatPES-PBE structures only: the 2,174-structure validation split of the 10% subset
+# (never used for gradient updates).
+python MD22/scripts/eval_force.py --checkpoint "$CKPT" --dataset data/matpes_pbe_10pct_val.npz --name matpes_pbe_heldout \
+  --fpbench FPBench --out results/force --workers "$WORKERS" 2>&1 | tee logs/eval_force_matpes.log
 [ "${PIPESTATUS[0]}" -eq 0 ] || echo "STAGE eval-force-matpes FAILED"
-gzip -f results/force/matpes_pbe_force_results_standardized.json
+gzip -f results/force/matpes_pbe_heldout_force_results_standardized.json
 hf_up "$HF_MODEL_REPO" model results results "FPBench force (MatPES-PBE)"
 
 stage eval-phase
