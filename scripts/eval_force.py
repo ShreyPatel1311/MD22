@@ -34,6 +34,10 @@ REL_THRESH = [0.01, 0.05, 0.10, 0.20, 0.3, 0.4, 0.50, 1, 2]
 THETA_THRESHOLDS = [1, 5, 10, 20, 30, 60, 90, 120, 178, 180]
 
 
+def _worker_init():
+    torch.set_num_threads(1)
+
+
 def _g(args):
     i, z, pos, cell, e, f = args
     return i, to_numpy(make_graph(z, pos, cell, r_max=5.0))
@@ -58,7 +62,9 @@ def predict_forces(model, arrays, device, max_atoms=6000, workers=8):
             energies[i] = e[j]
             off += na
 
-    with mp.Pool(workers) as pool:
+    # spawn, not fork: the parent has already run torch (model on GPU), and forked children that
+    # use torch's thread pool can deadlock (observed on the Vast.ai instance after 60k structures).
+    with mp.get_context("spawn").Pool(workers, initializer=_worker_init) as pool:
         for k, (i, g) in enumerate(pool.imap(_g, iter_structures(arrays), chunksize=32)):
             na = int(arrays["n_atoms"][i])
             if batch and n_at + na > max_atoms:
@@ -150,7 +156,7 @@ def main():
                            "models": {k: {kk: np.asarray(vv).tolist() for kk, vv in v.items()} for k, v in fr.items()}}, f)
         summary[pop] = {"n_structures": int(len(idx)), "tables": metrics_tables(fr, Path(args.fpbench))}
     (out / f"{args.name}_force_metrics.json").write_text(json.dumps(summary, indent=1, default=float))
-    print(json.dumps({k: v for k, v in summary.items() if k not in populations}, indent=1))
+    print("FORCE_METRICS " + json.dumps(summary, default=float))
 
 
 if __name__ == "__main__":
