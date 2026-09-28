@@ -2,6 +2,9 @@
 # End-to-end run on a Vast.ai GPU instance: data -> e2IP training -> FPBench (4 components).
 # With HF_TOKEN in the environment, data, checkpoints, results and logs are pushed to Hugging Face.
 # Without it every artifact stays under /workspace/run and the upload steps are skipped.
+# With CKPT_IN set, training is skipped: the script waits (up to 3 h) for that checkpoint file,
+# e.g. copied in from a training instance with Vast's copy_direct, and runs the evaluations on it.
+# Evaluation stages are independent: a failed stage is logged as FAILED and the next one still runs.
 set -euo pipefail
 
 TRAIN_HOURS="${TRAIN_HOURS:-5}"
@@ -44,33 +47,47 @@ python MD22/scripts/prepare_data.py matpes --out data
 mkdir -p hf_data && cp data/matpes_pbe_10pct_train.npz data/matpes_pbe_10pct_val.npz data/matpes_pbe_10pct_split.json hf_data/
 hf_up "$HF_DATA_REPO" dataset hf_data . "MatPES-PBE v2025.1 10% subset (seed 0), 95/5 train/val"
 
-stage train
-python -m md22nop.training.train --train data/matpes_pbe_10pct_train.npz --val data/matpes_pbe_10pct_val.npz \
-  --out ckpt --hours "$TRAIN_HOURS" --workers "$WORKERS" 2>&1 | tee logs/train.log
-hf_up "$HF_MODEL_REPO" model ckpt checkpoints "e2IP-NequIP checkpoints"
-CKPT="$W/ckpt/final.pt"
+if [ -n "${CKPT_IN:-}" ]; then
+  stage wait-checkpoint "$CKPT_IN"
+  for _ in $(seq 1 360); do [ -s "$CKPT_IN" ] && break; sleep 30; done
+  [ -s "$CKPT_IN" ] || { echo "checkpoint $CKPT_IN never arrived"; exit 1; }
+  sleep 60  # let an in-progress copy finish writing
+  CKPT="$CKPT_IN"
+  python -c "import torch,json,sys; c=torch.load(sys.argv[1],map_location='cpu',weights_only=False); print('checkpoint history', json.dumps(c['history'][-1]))" "$CKPT"
+else
+  stage train
+  python -m md22nop.training.train --train data/matpes_pbe_10pct_train.npz --val data/matpes_pbe_10pct_val.npz \
+    --out ckpt --hours "$TRAIN_HOURS" --workers "$WORKERS" 2>&1 | tee logs/train.log
+  hf_up "$HF_MODEL_REPO" model ckpt checkpoints "e2IP-NequIP checkpoints"
+  CKPT="$W/ckpt/final.pt"
+fi
+set +e
 
 stage eval-force-matpes
 python MD22/scripts/eval_force.py --checkpoint "$CKPT" --dataset data/matpes_pbe_full.npz --name matpes_pbe \
   --exclude-ids data/matpes_pbe_10pct_split.json --fpbench FPBench --out results/force --workers "$WORKERS" 2>&1 | tee logs/eval_force_matpes.log
-rm -f results/force/matpes_pbe_force_results_standardized.json.gz; gzip -f results/force/matpes_pbe_force_results_standardized.json
+[ "${PIPESTATUS[0]}" -eq 0 ] || echo "STAGE eval-force-matpes FAILED"
+gzip -f results/force/matpes_pbe_force_results_standardized.json
 hf_up "$HF_MODEL_REPO" model results results "FPBench force (MatPES-PBE)"
 
 stage eval-phase
 python MD22/scripts/eval_phase.py --checkpoint "$CKPT" --fpbench FPBench --out results/phase --workers "$WORKERS" 2>&1 | tee logs/eval_phase.log
+[ "${PIPESTATUS[0]}" -eq 0 ] || echo "STAGE eval-phase FAILED"
 hf_up "$HF_MODEL_REPO" model results results "FPBench phase stability & ordering"
 
 stage eval-neb
 python MD22/scripts/eval_neb.py --checkpoint "$CKPT" --fpbench FPBench --src MD22/src --out results/neb --workers "$WORKERS" 2>&1 | tee logs/eval_neb.log
+[ "${PIPESTATUS[0]}" -eq 0 ] || echo "STAGE eval-neb FAILED"
 rm -rf results/neb/neb_component/generation/runs
 hf_up "$HF_MODEL_REPO" model results results "FPBench ion-migration NEB"
 
 stage data-omat24
-python MD22/scripts/prepare_data.py omat24 --out data
+python MD22/scripts/prepare_data.py omat24 --out data || echo "STAGE data-omat24 FAILED"
 
 stage eval-force-omat24
 python MD22/scripts/eval_force.py --checkpoint "$CKPT" --dataset data/omat24_rattled_1000.npz --name omat24_rattled_1000 \
   --fpbench FPBench --out results/force --workers "$WORKERS" 2>&1 | tee logs/eval_force_omat24.log
+[ "${PIPESTATUS[0]}" -eq 0 ] || echo "STAGE eval-force-omat24 FAILED"
 gzip -f results/force/omat24_rattled_1000_force_results_standardized.json
 hf_up "$HF_MODEL_REPO" model results results "FPBench force (OMat24 rattled-1000)"
 
