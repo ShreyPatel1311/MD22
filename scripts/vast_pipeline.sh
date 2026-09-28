@@ -9,7 +9,8 @@ set -euo pipefail
 
 TRAIN_HOURS="${TRAIN_HOURS:-5}"
 EVAL_STAGES="${EVAL_STAGES:-force-matpes phase neb omat24}"   # evaluation stages to run
-OMAT_FRACTION="${OMAT_FRACTION:-1.0}"                            # random fraction of OMat24 rattled-1000
+OMAT_FRACTION="${OMAT_FRACTION:-0.1}"                            # random fraction of OMat24 rattled-1000
+NEB_FRACTION="${NEB_FRACTION:-0.1}"                              # random fraction of the 154 NEB pathways
 want() { case " $EVAL_STAGES " in *" $1 "*) return 0;; esac; return 1; }
 WORKERS="${WORKERS:-12}"
 HF_MODEL_REPO="${HF_MODEL_REPO:-Godseye1311/e2ip-nequip-matpes10}"
@@ -88,7 +89,8 @@ fi
 
 if want neb; then
 stage eval-neb
-python MD22/scripts/eval_neb.py --checkpoint "$CKPT" --fpbench FPBench --src MD22/src --out results/neb --workers "$WORKERS" 2>&1 | tee logs/eval_neb.log
+python MD22/scripts/eval_neb.py --checkpoint "$CKPT" --fpbench FPBench --src MD22/src --out results/neb --workers "$WORKERS" \
+  --fraction "$NEB_FRACTION" --seed 0 2>&1 | tee logs/eval_neb.log
 [ "${PIPESTATUS[0]}" -eq 0 ] || echo "STAGE eval-neb FAILED"
 rm -rf results/neb/neb_component/generation/runs
 hf_up "$HF_MODEL_REPO" model results results "FPBench ion-migration NEB"
