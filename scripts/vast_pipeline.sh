@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end run on a Vast.ai GPU instance: data -> training -> FPBench (4 components).
-# MODEL_TYPE=e2ip (default) trains e2IP-NequIP; MODEL_TYPE=nequip trains the plain NequIP baseline.
+# MODEL_TYPE=e2ip (default) trains e2IP-NequIP; eip trains eIP-NequIP; nequip trains the plain NequIP baseline.
 # With HF_TOKEN in the environment, data, checkpoints, results and logs are pushed to Hugging Face.
 # Without it every artifact stays under /workspace/run and the upload steps are skipped.
 # With CKPT_IN set, training is skipped: the script waits (up to 3 h) for that checkpoint file,
@@ -17,6 +17,8 @@ STOP_AFTER_MIN="${STOP_AFTER_MIN:-}"                             # end training 
 MODEL_TYPE="${MODEL_TYPE:-e2ip}"
 if [ "$MODEL_TYPE" = nequip ]; then
   MODEL_KEY=nequip_matpes10; MODEL_NAME=NequIP-MatPES10; OUTPUT_KEY=NequIP_MatPES10
+elif [ "$MODEL_TYPE" = eip ]; then
+  MODEL_KEY=eip_nequip_matpes10; MODEL_NAME=eIP-NequIP-MatPES10; OUTPUT_KEY=eIP_NequIP_MatPES10
 else
   MODEL_KEY=e2ip_nequip_matpes10; MODEL_NAME=e2IP-NequIP-MatPES10; OUTPUT_KEY=e2IP_NequIP_MatPES10
 fi

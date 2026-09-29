@@ -121,3 +121,42 @@ def test_plain_nequip_forces_and_checkpoint_roundtrip(tmp_path):
     m2, _ = load_model(tmp_path / "p.pt")
     out2 = _run(m2.double(), _atoms())
     assert torch.allclose(out["forces"], out2["forces"])
+
+
+def test_eip_vector_features_rotate_and_loss_backward(tmp_path):
+    from e3nn import o3
+    from md22nop.models.eip import build_eip_nequip, quant_evi_loss
+    from md22nop.models.e2ip import E2IP_FEATURES_KEY
+    from md22nop.training.train import load_model
+
+    torch.manual_seed(0)
+    m = build_eip_nequip(TYPE_NAMES, num_layers=3, num_features=[16, 8, 8], radial_mlp_width=16,
+                         avg_num_neighbors=40.0, per_type_energy_scales=1.0, per_type_energy_shifts=0.0).double().eval()
+    at = _atoms()
+    R = o3.rand_matrix().double()
+    at_r = at.copy()
+    at_r.positions = at.positions @ R.numpy().T
+    at_r.cell = at.cell.array @ R.numpy().T
+
+    def feats(a):
+        out = m.energy_model(dict(collate([graph_from_atoms(a, dtype=torch.float64)])))
+        return m.vector_features(out[E2IP_FEATURES_KEY]).detach()
+
+    v, v_r = feats(at), feats(at_r)  # [n, 3, mul]
+    assert torch.allclose(torch.einsum("ij,njm->nim", R, v), v_r, atol=1e-8)
+
+    out = _run(m, at)
+    for k in ("eip_nu", "eip_alpha", "eip_beta"):
+        assert out[k].shape == out["forces"].shape
+    m.train()
+    out_t = _run(m, at)
+    y = out_t["forces"].detach() + 0.1
+    loss = quant_evi_loss(y, out_t["forces"], out_t["eip_nu"], out_t["eip_alpha"], out_t["eip_beta"]).mean(0).sum()
+    loss.backward()
+    grads = [p.grad for p in m.parameters() if p.grad is not None]
+    assert torch.isfinite(loss) and grads and all(torch.isfinite(g).all() for g in grads)
+    m.eval()
+
+    torch.save({"model_config": m.config, "state_dict": m.state_dict()}, tmp_path / "e.pt")
+    m2, _ = load_model(tmp_path / "e.pt")
+    assert torch.allclose(_run(m2.double(), at)["eip_nu"], _run(m, at)["eip_nu"])

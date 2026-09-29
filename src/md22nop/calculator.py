@@ -1,7 +1,8 @@
-"""ASE calculator for a trained e2IP-NequIP or plain NequIP checkpoint.
+"""ASE calculator for a trained e2IP-NequIP, eIP-NequIP or plain NequIP checkpoint.
 
 For e2IP checkpoints it also exposes the per-atom evidential outputs
-(``e2ip_nu``, ``e2ip_kappa``, ``e2ip_epistemic_scalar``) in ``results``.
+(``e2ip_nu``, ``e2ip_kappa``, ``e2ip_epistemic_scalar``) in ``results``; for eIP checkpoints the
+per-atom uncertainty of eIP Eq. (6) (``eip_epistemic``).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from ase.stress import full_3x3_to_voigt_6_stress
 
 from md22nop.data.graph import collate, graph_from_atoms
 from md22nop.models.e2ip import uncertainty_tensors
+from md22nop.models.eip import eip_epistemic
 from md22nop.training.train import load_model
 
 
@@ -40,6 +42,8 @@ class E2IPCalculator(Calculator):
             # NequIP's stress follows the ASE sign convention (nequip.integrations.ase uses it as is).
             "stress": full_3x3_to_voigt_6_stress(out["stress"].detach().double().cpu().numpy().reshape(3, 3)),
         }
+        if "eip_nu" in out:
+            self.results["eip_epistemic"] = eip_epistemic(out["eip_nu"], out["eip_alpha"], out["eip_beta"]).detach().cpu().numpy()
         if "nu" in out:
             _, _, u_scalar = uncertainty_tensors(self.model, out["nu"], out["kappa"], out["S"])
             self.results.update({

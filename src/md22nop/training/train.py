@@ -1,4 +1,4 @@
-"""Time-budgeted e2IP (or plain NequIP baseline) training on MatPES-PBE subsets.
+"""Time-budgeted e2IP, eIP or plain NequIP training on MatPES-PBE subsets.
 
 e2IP loss (per batch, ``--model e2ip``):
     L = lambda_E * mean_structures(((E_pred - E) / N_atoms)^2)      [eV^2 / atom^2]
@@ -12,6 +12,13 @@ Plain NequIP baseline loss (``--model nequip``, same backbone without the eviden
     L = lambda_E * mean_structures(((E_pred - E) / N_atoms)^2) + 100 * mean_components((F_pred - F)^2)
 i.e. mace-torch's WeightedEnergyForcesLoss with its default ``--forces_weight`` 100.0
 (``--stage_two_forces_weight`` 100.0) and the same energy weights as above.
+
+eIP loss (``--model eip``, same backbone with the eIP head of ``md22nop.models.eip``):
+    L = lambda_E * mean_structures(((E_pred - E) / N_atoms)^2) + sum_{c=x,y,z} mean_atoms(quant_evi_loss_c)
+The force term is the official eIP code's (run.py: sum over components of the mean
+``quant_evi_loss``, quantile 0.6, regularizer coefficient 0.1). The energy term is kept identical to
+the e2IP and NequIP runs instead of eIP's L1 total-energy loss and 10000 : 0.1 weighting, so that only
+the head and force loss differ between the three models.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import torch
 from md22nop.data.graph import TYPE_NAMES, collate, from_numpy, make_graph, to_numpy
 from md22nop.data.matpes import iter_structures
 from md22nop.models.e2ip import build_e2ip_nequip, build_plain_nequip, e2ip_nll, e2ip_regularizer
+from md22nop.models.eip import build_eip_nequip, quant_evi_loss
 from nequip.data import AtomicDataDict
 
 R_MAX = 5.0
@@ -98,6 +106,11 @@ def compute_loss(model, out, batch, cfg, lambda_e):
         loss_f = (out["forces"] - y).pow(2).mean()
         loss = lambda_e * loss_e + cfg["lambda_f"] * loss_f
         return loss, {"loss_e": loss_e.item(), "loss_f": loss_f.item()}
+    if cfg["model_type"] == "eip":
+        loss_f = quant_evi_loss(y, out["forces"], out["eip_nu"], out["eip_alpha"], out["eip_beta"],
+                                quantile=cfg["eip_quantile"], coeff=cfg["eip_reg_coeff"]).mean(0).sum()
+        loss = lambda_e * loss_e + cfg["lambda_f"] * loss_f
+        return loss, {"loss_e": loss_e.item(), "loss_f": loss_f.item()}
     nll = e2ip_nll(y, out["forces"], out["nu"], out["kappa"], out["S"], model.head.force_scale)
     reg = e2ip_regularizer(y, out["forces"], out["nu"], out["kappa"])
     loss_f = (nll + cfg["lambda_reg"] * reg).mean()
@@ -131,7 +144,7 @@ def evaluate(model, graphs, device, max_atoms):
         "energy_mae_meV_per_atom": 1000 * e_abs / n_struct,
         "force_mae_meV_per_A": 1000 * f_abs / (3 * n_atoms),
     }
-    if hasattr(model, "head"):
+    if model.config.get("model_type", "e2ip") == "e2ip":
         metrics["force_nll_per_atom"] = nll_sum / n_atoms
     return metrics
 
@@ -144,7 +157,7 @@ def save_checkpoint(path: Path, model, stats, cfg, history):
 def load_model(path, device="cpu"):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     cfg = dict(ckpt["model_config"])
-    build = build_plain_nequip if cfg.get("model_type", "e2ip") == "nequip" else build_e2ip_nequip
+    build = {"nequip": build_plain_nequip, "eip": build_eip_nequip}.get(cfg.get("model_type", "e2ip"), build_e2ip_nequip)
     model = build(**{k: v for k, v in cfg.items() if k not in ("config", "model_type")})
     model.load_state_dict(ckpt["state_dict"])
     return model.to(device).eval(), ckpt
@@ -155,7 +168,7 @@ def main():
     p.add_argument("--train", required=True)
     p.add_argument("--val", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--model", choices=["e2ip", "nequip"], default="e2ip")
+    p.add_argument("--model", choices=["e2ip", "eip", "nequip"], default="e2ip")
     p.add_argument("--hours", type=float, default=5.0, help="wall-time budget that sets the LR/energy-weight schedule")
     p.add_argument("--stop-after-min", type=float, default=None,
                    help="end training after this many minutes while keeping the --hours schedule")
@@ -190,7 +203,7 @@ def main():
     )
     if args.model == "e2ip":
         model_kwargs.update(head_hidden=32, force_scale=0.1)
-    build = build_e2ip_nequip if args.model == "e2ip" else build_plain_nequip
+    build = {"e2ip": build_e2ip_nequip, "eip": build_eip_nequip, "nequip": build_plain_nequip}[args.model]
     model = build(**model_kwargs).to(device)
     ema = build(**model_kwargs).to(device).eval()
     ema.load_state_dict(model.state_dict())
@@ -198,7 +211,8 @@ def main():
         q.requires_grad_(False)
     n_params = sum(q.numel() for q in model.parameters())
     cfg = {"model_type": args.model, "lambda_e": 1.0, "lambda_e_stage_two": 1000.0, "stage_two_start_frac": 0.75,
-           "lambda_f": 1.0 if args.model == "e2ip" else 100.0, "lambda_reg": 0.1, "lr": args.lr,
+           "lambda_f": 100.0 if args.model == "nequip" else 1.0, "lambda_reg": 0.1, "eip_quantile": 0.6,
+           "eip_reg_coeff": 0.1, "lr": args.lr,
            "weight_decay": 1e-3, "ema_decay": 0.999, "grad_clip": 10.0, "max_atoms": args.max_atoms,
            "hours": args.hours, "stop_after_min": args.stop_after_min, "n_params": n_params, "r_max": R_MAX}
     print(f"model params: {n_params}", flush=True)
