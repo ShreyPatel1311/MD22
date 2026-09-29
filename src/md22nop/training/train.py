@@ -1,12 +1,17 @@
-"""Time-budgeted e2IP training on MatPES-PBE subsets.
+"""Time-budgeted e2IP (or plain NequIP baseline) training on MatPES-PBE subsets.
 
-Loss (per batch):
+e2IP loss (per batch, ``--model e2ip``):
     L = lambda_E * mean_structures(((E_pred - E) / N_atoms)^2)      [eV^2 / atom^2]
       + lambda_F * mean_atoms(NLL_i + lambda_reg * reg_i)
 NLL_i and reg_i are Eqs. (13)-(14) of the e2IP paper; lambda_reg = 0.1 follows its Table 5.
 The paper does not state its energy loss, so the energy term follows mace-torch's defaults
 (per-atom energy MSE, energy weight 1.0, raised to 1000.0 for the last quarter of training,
 ``--energy_weight`` / ``--stage_two_energy_weight`` / ``start_swa = 3/4 of epochs``).
+
+Plain NequIP baseline loss (``--model nequip``, same backbone without the evidential head):
+    L = lambda_E * mean_structures(((E_pred - E) / N_atoms)^2) + 100 * mean_components((F_pred - F)^2)
+i.e. mace-torch's WeightedEnergyForcesLoss with its default ``--forces_weight`` 100.0
+(``--stage_two_forces_weight`` 100.0) and the same energy weights as above.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ import torch
 
 from md22nop.data.graph import TYPE_NAMES, collate, from_numpy, make_graph, to_numpy
 from md22nop.data.matpes import iter_structures
-from md22nop.models.e2ip import build_e2ip_nequip, e2ip_nll, e2ip_regularizer
+from md22nop.models.e2ip import build_e2ip_nequip, build_plain_nequip, e2ip_nll, e2ip_regularizer
 from nequip.data import AtomicDataDict
 
 R_MAX = 5.0
@@ -89,6 +94,10 @@ def compute_loss(model, out, batch, cfg, lambda_e):
     e_ref = batch[AtomicDataDict.TOTAL_ENERGY_KEY].reshape(-1)
     loss_e = (((out["energy"] - e_ref) / n) ** 2).mean()
     y = batch[AtomicDataDict.FORCE_KEY]
+    if cfg["model_type"] == "nequip":
+        loss_f = (out["forces"] - y).pow(2).mean()
+        loss = lambda_e * loss_e + cfg["lambda_f"] * loss_f
+        return loss, {"loss_e": loss_e.item(), "loss_f": loss_f.item()}
     nll = e2ip_nll(y, out["forces"], out["nu"], out["kappa"], out["S"], model.head.force_scale)
     reg = e2ip_regularizer(y, out["forces"], out["nu"], out["kappa"])
     loss_f = (nll + cfg["lambda_reg"] * reg).mean()
@@ -114,14 +123,17 @@ def evaluate(model, graphs, device, max_atoms):
         with torch.no_grad():
             e_abs += ((out["energy"] - e_ref) / n).abs().sum().item()
             f_abs += (out["forces"] - y).abs().sum().item()
-            nll_sum += e2ip_nll(y, out["forces"], out["nu"], out["kappa"], out["S"], model.head.force_scale).sum().item()
+            if "nu" in out:
+                nll_sum += e2ip_nll(y, out["forces"], out["nu"], out["kappa"], out["S"], model.head.force_scale).sum().item()
         n_struct += len(idx)
         n_atoms += y.shape[0]
-    return {
+    metrics = {
         "energy_mae_meV_per_atom": 1000 * e_abs / n_struct,
         "force_mae_meV_per_A": 1000 * f_abs / (3 * n_atoms),
-        "force_nll_per_atom": nll_sum / n_atoms,
     }
+    if hasattr(model, "head"):
+        metrics["force_nll_per_atom"] = nll_sum / n_atoms
+    return metrics
 
 
 def save_checkpoint(path: Path, model, stats, cfg, history):
@@ -132,7 +144,8 @@ def save_checkpoint(path: Path, model, stats, cfg, history):
 def load_model(path, device="cpu"):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     cfg = dict(ckpt["model_config"])
-    model = build_e2ip_nequip(**{k: v for k, v in cfg.items() if k != "config"})
+    build = build_plain_nequip if cfg.get("model_type", "e2ip") == "nequip" else build_e2ip_nequip
+    model = build(**{k: v for k, v in cfg.items() if k not in ("config", "model_type")})
     model.load_state_dict(ckpt["state_dict"])
     return model.to(device).eval(), ckpt
 
@@ -142,7 +155,10 @@ def main():
     p.add_argument("--train", required=True)
     p.add_argument("--val", required=True)
     p.add_argument("--out", required=True)
-    p.add_argument("--hours", type=float, default=5.0)
+    p.add_argument("--model", choices=["e2ip", "nequip"], default="e2ip")
+    p.add_argument("--hours", type=float, default=5.0, help="wall-time budget that sets the LR/energy-weight schedule")
+    p.add_argument("--stop-after-min", type=float, default=None,
+                   help="end training after this many minutes while keeping the --hours schedule")
     p.add_argument("--max-atoms", type=int, default=1200)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--warmup-frac", type=float, default=0.02)
@@ -170,21 +186,26 @@ def main():
         type_names=TYPE_NAMES, r_max=R_MAX, num_layers=4, l_max=2, parity=False, num_features=[128, 64, 32],
         type_embed_num_features=32, radial_mlp_depth=1, radial_mlp_width=128,
         avg_num_neighbors=stats["avg_num_neighbors"], per_type_energy_scales=stats["force_rms"],
-        per_type_energy_shifts=stats["per_type_energy_shifts"], head_hidden=32, force_scale=0.1,
+        per_type_energy_shifts=stats["per_type_energy_shifts"],
     )
-    model = build_e2ip_nequip(**model_kwargs).to(device)
-    ema = build_e2ip_nequip(**model_kwargs).to(device).eval()
+    if args.model == "e2ip":
+        model_kwargs.update(head_hidden=32, force_scale=0.1)
+    build = build_e2ip_nequip if args.model == "e2ip" else build_plain_nequip
+    model = build(**model_kwargs).to(device)
+    ema = build(**model_kwargs).to(device).eval()
     ema.load_state_dict(model.state_dict())
     for q in ema.parameters():
         q.requires_grad_(False)
     n_params = sum(q.numel() for q in model.parameters())
-    cfg = {"lambda_e": 1.0, "lambda_e_stage_two": 1000.0, "stage_two_start_frac": 0.75, "lambda_f": 1.0, "lambda_reg": 0.1, "lr": args.lr,
+    cfg = {"model_type": args.model, "lambda_e": 1.0, "lambda_e_stage_two": 1000.0, "stage_two_start_frac": 0.75,
+           "lambda_f": 1.0 if args.model == "e2ip" else 100.0, "lambda_reg": 0.1, "lr": args.lr,
            "weight_decay": 1e-3, "ema_decay": 0.999, "grad_clip": 10.0, "max_atoms": args.max_atoms,
-           "hours": args.hours, "n_params": n_params, "r_max": R_MAX}
+           "hours": args.hours, "stop_after_min": args.stop_after_min, "n_params": n_params, "r_max": R_MAX}
     print(f"model params: {n_params}", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=cfg["weight_decay"])
 
     budget = args.hours * 3600
+    stop_at = budget if args.stop_after_min is None else min(budget, args.stop_after_min * 60)
     t_start, last_val, step, epoch = time.time(), time.time(), 0, 0
     history, best = [], float("inf")
     rng = np.random.default_rng(args.seed)
@@ -193,7 +214,7 @@ def main():
         epoch += 1
         for idx in make_batches(train_g, args.max_atoms, rng):
             frac = (time.time() - t_start) / budget
-            if frac >= 1.0:
+            if time.time() - t_start >= stop_at:
                 done = True
                 break
             lr = args.lr * (frac / args.warmup_frac if frac < args.warmup_frac else

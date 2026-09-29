@@ -105,3 +105,19 @@ def test_forward_does_not_overwrite_input_labels(model):
     assert g[AtomicDataDict.TOTAL_ENERGY_KEY].item() == e_ref
     assert torch.equal(g[AtomicDataDict.FORCE_KEY], torch.as_tensor(f_ref))
     assert not torch.allclose(out["forces"], g[AtomicDataDict.FORCE_KEY])
+
+
+def test_plain_nequip_forces_and_checkpoint_roundtrip(tmp_path):
+    from md22nop.models.e2ip import build_plain_nequip
+    from md22nop.training.train import load_model
+
+    torch.manual_seed(0)
+    kw = dict(num_layers=3, num_features=[16, 8, 8], radial_mlp_width=16, avg_num_neighbors=40.0,
+              per_type_energy_scales=1.0, per_type_energy_shifts=0.0)
+    m = build_plain_nequip(TYPE_NAMES, **kw).double().eval()
+    out = _run(m, _atoms())
+    assert set(out) >= {"energy", "forces"} and "nu" not in out
+    torch.save({"model_config": m.config, "state_dict": m.state_dict()}, tmp_path / "p.pt")
+    m2, _ = load_model(tmp_path / "p.pt")
+    out2 = _run(m2.double(), _atoms())
+    assert torch.allclose(out["forces"], out2["forces"])

@@ -1,6 +1,6 @@
-"""ASE calculator for a trained e2IP-NequIP checkpoint.
+"""ASE calculator for a trained e2IP-NequIP or plain NequIP checkpoint.
 
-Besides ``energy`` and ``forces`` it exposes the per-atom evidential outputs
+For e2IP checkpoints it also exposes the per-atom evidential outputs
 (``e2ip_nu``, ``e2ip_kappa``, ``e2ip_epistemic_scalar``) in ``results``.
 """
 
@@ -32,7 +32,6 @@ class E2IPCalculator(Calculator):
         data = collate([graph_from_atoms(self.atoms, r_max=self.r_max)])
         data = {k: (v.to(self.device) if torch.is_tensor(v) else v) for k, v in data.items()}
         out = self.model(data)
-        _, _, u_scalar = uncertainty_tensors(self.model, out["nu"], out["kappa"], out["S"])
         energy = float(out["energy"].detach().double().item())
         self.results = {
             "energy": energy,
@@ -40,7 +39,11 @@ class E2IPCalculator(Calculator):
             "forces": out["forces"].detach().double().cpu().numpy(),
             # NequIP's stress follows the ASE sign convention (nequip.integrations.ase uses it as is).
             "stress": full_3x3_to_voigt_6_stress(out["stress"].detach().double().cpu().numpy().reshape(3, 3)),
-            "e2ip_nu": out["nu"].detach().cpu().numpy(),
-            "e2ip_kappa": out["kappa"].detach().cpu().numpy(),
-            "e2ip_epistemic_scalar": u_scalar.detach().cpu().numpy(),
         }
+        if "nu" in out:
+            _, _, u_scalar = uncertainty_tensors(self.model, out["nu"], out["kappa"], out["S"])
+            self.results.update({
+                "e2ip_nu": out["nu"].detach().cpu().numpy(),
+                "e2ip_kappa": out["kappa"].detach().cpu().numpy(),
+                "e2ip_epistemic_scalar": u_scalar.detach().cpu().numpy(),
+            })

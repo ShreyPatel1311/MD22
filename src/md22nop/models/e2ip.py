@@ -165,31 +165,26 @@ class E2IPNequIP(torch.nn.Module):
         return self.head.force_scale**2 * torch.linalg.matrix_exp(S)
 
 
-def build_e2ip_nequip(
+def _nequip_energy_model(
     type_names: Sequence[str],
-    r_max: float = 5.0,
-    num_layers: int = 4,
-    l_max: int = 2,
-    parity: bool = False,
-    num_features: Union[int, List[int]] = (128, 64, 32),
-    type_embed_num_features: int = 32,
-    radial_mlp_depth: int = 1,
-    radial_mlp_width: int = 128,
-    num_bessels: int = 8,
-    polynomial_cutoff_p: int = 6,
-    avg_num_neighbors: Optional[float] = None,
-    per_type_energy_scales: Optional[Union[float, Sequence[float]]] = None,
-    per_type_energy_shifts: Optional[Union[float, Sequence[float]]] = None,
-    head_hidden: int = 32,
-    force_scale: float = 0.1,
-) -> E2IPNequIP:
+    r_max: float,
+    num_layers: int,
+    l_max: int,
+    parity: bool,
+    num_features: Union[int, List[int]],
+    type_embed_num_features: int,
+    radial_mlp_depth: int,
+    radial_mlp_width: int,
+    num_bessels: int,
+    polynomial_cutoff_p: int,
+    avg_num_neighbors: Optional[float],
+    per_type_energy_scales,
+    per_type_energy_shifts,
+    save_features: bool,
+):
     """Mirrors ``nequip.model.nequip_models.FullNequIPGNNModel`` (nequip 0.19.1) with the default
-    ``convnet_*`` settings, adding ``SaveNodeFeatures`` before the final scalar-only layer."""
-    assert num_layers >= 2 and l_max >= 2, "e2IP needs l=2 features from a non-final layer"
-    config = {k: v for k, v in locals().items()}
-    config["type_names"] = list(type_names)
-    config["num_features"] = list(num_features) if not isinstance(num_features, int) else num_features
-
+    ``convnet_*`` settings. With ``save_features`` a ``SaveNodeFeatures`` pass-through is inserted
+    before the final scalar-only layer. Returns (energy model, hidden irreps, num_features list)."""
     if isinstance(num_features, int):
         num_features = [num_features] * (l_max + 1)
     num_features = list(num_features)
@@ -247,7 +242,7 @@ def build_e2ip_nequip(
         )
         prev = layer.irreps_out
         modules[f"layer{i}_convnet"] = layer
-        if i == num_layers - 2:
+        if save_features and i == num_layers - 2:
             save = SaveNodeFeatures(irreps_in=prev)
             prev = save.irreps_out
             modules["save_e2ip_features"] = save
@@ -278,6 +273,39 @@ def build_e2ip_nequip(
     energy_model = _append_energy_modules(SequentialGraphNetwork(modules), type_names=type_names)
     energy_model = ForceStressOutput(energy_model, do_derivatives=True)
 
+    return energy_model, hidden, num_features
+
+
+def build_e2ip_nequip(
+    type_names: Sequence[str],
+    r_max: float = 5.0,
+    num_layers: int = 4,
+    l_max: int = 2,
+    parity: bool = False,
+    num_features: Union[int, List[int]] = (128, 64, 32),
+    type_embed_num_features: int = 32,
+    radial_mlp_depth: int = 1,
+    radial_mlp_width: int = 128,
+    num_bessels: int = 8,
+    polynomial_cutoff_p: int = 6,
+    avg_num_neighbors: Optional[float] = None,
+    per_type_energy_scales: Optional[Union[float, Sequence[float]]] = None,
+    per_type_energy_shifts: Optional[Union[float, Sequence[float]]] = None,
+    head_hidden: int = 32,
+    force_scale: float = 0.1,
+) -> E2IPNequIP:
+    """NequIP backbone (see ``_nequip_energy_model``) plus the e2IP evidential head."""
+    assert num_layers >= 2 and l_max >= 2, "e2IP needs l=2 features from a non-final layer"
+    config = {k: v for k, v in locals().items()}
+    config["type_names"] = list(type_names)
+    config["num_features"] = list(num_features) if not isinstance(num_features, int) else num_features
+    config["model_type"] = "e2ip"
+
+    energy_model, hidden, num_features = _nequip_energy_model(
+        type_names, r_max, num_layers, l_max, parity, num_features, type_embed_num_features,
+        radial_mlp_depth, radial_mlp_width, num_bessels, polynomial_cutoff_p, avg_num_neighbors,
+        per_type_energy_scales, per_type_energy_shifts, save_features=True,
+    )
     head = EvidentialHead(
         irreps_equivariant=o3.Irreps(hidden),
         num_final_scalars=num_features[0],
@@ -285,6 +313,51 @@ def build_e2ip_nequip(
         force_scale=force_scale,
     )
     return E2IPNequIP(energy_model, head, config)
+
+
+class PlainNequIP(torch.nn.Module):
+    """Baseline without the e2IP head: the same NequIP energy model, forces = -grad E."""
+
+    def __init__(self, energy_model: ForceStressOutput, config: Dict):
+        super().__init__()
+        self.energy_model = energy_model
+        self.config = config
+
+    def forward(self, data: AtomicDataDict.Type) -> Dict[str, torch.Tensor]:
+        out = self.energy_model(dict(data))
+        ev = {"energy": out[AtomicDataDict.TOTAL_ENERGY_KEY].reshape(-1), "forces": out[AtomicDataDict.FORCE_KEY]}
+        if AtomicDataDict.STRESS_KEY in out:
+            ev["stress"] = out[AtomicDataDict.STRESS_KEY]
+        return ev
+
+
+def build_plain_nequip(
+    type_names: Sequence[str],
+    r_max: float = 5.0,
+    num_layers: int = 4,
+    l_max: int = 2,
+    parity: bool = False,
+    num_features: Union[int, List[int]] = (128, 64, 32),
+    type_embed_num_features: int = 32,
+    radial_mlp_depth: int = 1,
+    radial_mlp_width: int = 128,
+    num_bessels: int = 8,
+    polynomial_cutoff_p: int = 6,
+    avg_num_neighbors: Optional[float] = None,
+    per_type_energy_scales: Optional[Union[float, Sequence[float]]] = None,
+    per_type_energy_shifts: Optional[Union[float, Sequence[float]]] = None,
+) -> PlainNequIP:
+    """The e2IP backbone without ``SaveNodeFeatures`` and without the evidential head."""
+    config = {k: v for k, v in locals().items()}
+    config["type_names"] = list(type_names)
+    config["num_features"] = list(num_features) if not isinstance(num_features, int) else num_features
+    config["model_type"] = "nequip"
+    energy_model, _, _ = _nequip_energy_model(
+        type_names, r_max, num_layers, l_max, parity, num_features, type_embed_num_features,
+        radial_mlp_depth, radial_mlp_width, num_bessels, polynomial_cutoff_p, avg_num_neighbors,
+        per_type_energy_scales, per_type_energy_shifts, save_features=False,
+    )
+    return PlainNequIP(energy_model, config)
 
 
 def e2ip_nll(y: torch.Tensor, gamma: torch.Tensor, nu: torch.Tensor, kappa: torch.Tensor,
